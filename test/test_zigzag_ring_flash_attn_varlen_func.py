@@ -98,6 +98,8 @@ if __name__ == "__main__":
     ring_out, ring_lse, _ = zigzag_ring_flash_attn_varlen_qkvpacked_func(
         local_qkv,
         local_cu_seqlens_tensor,
+        local_cu_seqlens_tensor,
+        local_max_seqlen,
         local_max_seqlen,
         dropout_p=dropout_p,
         causal=causal,

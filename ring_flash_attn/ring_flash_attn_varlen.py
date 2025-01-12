@@ -27,8 +27,10 @@ def ring_flash_attn_varlen_forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens,
-    max_seqlen,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
     softmax_scale,
     dropout_p=0,
     causal=True,
@@ -53,10 +55,10 @@ def ring_flash_attn_varlen_forward(
                     "q": q,
                     "k": k,
                     "v": v,
-                    "cu_seqlens_q": cu_seqlens,
-                    "cu_seqlens_k": cu_seqlens,
-                    "max_seqlen_q": max_seqlen,
-                    "max_seqlen_k": max_seqlen,
+                    "cu_seqlens_q": cu_seqlens_q,
+                    "cu_seqlens_k": cu_seqlens_k,
+                    "max_seqlen_q": max_seqlen_q,
+                    "max_seqlen_k": max_seqlen_k,
                     "dropout_p": dropout_p,
                     "softmax_scale": softmax_scale,
                     "causal": causal and step == 0,
@@ -84,7 +86,7 @@ def ring_flash_attn_varlen_forward(
                 old_lse = True
                 block_lse = flatten_varlen_lse(
                     block_lse,
-                    cu_seqlens=cu_seqlens,
+                    cu_seqlens=cu_seqlens_q,
                 )
             out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
@@ -94,7 +96,7 @@ def ring_flash_attn_varlen_forward(
 
     out = out.to(q.dtype)
     if old_lse:
-        lse = unflatten_varlen_lse(lse, cu_seqlens, max_seqlen)
+        lse = unflatten_varlen_lse(lse, cu_seqlens_q, max_seqlen_q)
     else:
         lse = lse.squeeze(dim=-1).transpose(0, 1)
     return out, lse
@@ -108,8 +110,10 @@ def ring_flash_attn_varlen_backward(
     v,
     out,
     softmax_lse,
-    cu_seqlens,
-    max_seqlen,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
     softmax_scale,
     dropout_p=0,
     causal=True,
@@ -146,10 +150,10 @@ def ring_flash_attn_varlen_backward(
                     "dq": block_dq_buffer,
                     "dk": block_dk_buffer,
                     "dv": block_dv_buffer,
-                    "cu_seqlens_q": cu_seqlens,
-                    "cu_seqlens_k": cu_seqlens,
-                    "max_seqlen_q": max_seqlen,
-                    "max_seqlen_k": max_seqlen,
+                    "cu_seqlens_q": cu_seqlens_q,
+                    "cu_seqlens_k": cu_seqlens_k,
+                    "max_seqlen_q": max_seqlen_q,
+                    "max_seqlen_k": max_seqlen_k,
                     "dropout_p": dropout_p,
                     "softmax_scale": softmax_scale,
                     "causal": bwd_causal,
@@ -199,8 +203,10 @@ class RingFlashAttnVarlenFunc(torch.autograd.Function):
         q,
         k,
         v,
-        cu_seqlens,
-        max_seqlen,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
         dropout_p,
         softmax_scale,
         causal,
@@ -221,8 +227,10 @@ class RingFlashAttnVarlenFunc(torch.autograd.Function):
             q,
             k,
             v,
-            cu_seqlens,
-            max_seqlen,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
             softmax_scale=softmax_scale,
             dropout_p=dropout_p,
             causal=causal,
@@ -231,8 +239,10 @@ class RingFlashAttnVarlenFunc(torch.autograd.Function):
             deterministic=False,
         )
         # this should be out_padded
-        ctx.save_for_backward(q, k, v, out, softmax_lse, cu_seqlens)
-        ctx.max_seqlen = max_seqlen
+        ctx.save_for_backward(q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k)
+        # ctx.max_seqlen = max_seqlen
+        ctx.max_seqlen_q = max_seqlen_q
+        ctx.max_seqlen_k = max_seqlen_k
         ctx.dropout_p = dropout_p
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
@@ -244,7 +254,7 @@ class RingFlashAttnVarlenFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, cu_seqlens = ctx.saved_tensors
+        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
         dq, dk, dv = ring_flash_attn_varlen_backward(
             ctx.group,
             dout,
@@ -253,8 +263,10 @@ class RingFlashAttnVarlenFunc(torch.autograd.Function):
             v,
             out,
             softmax_lse,
-            cu_seqlens,
-            ctx.max_seqlen,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            ctx.max_seqlen_q,
+            ctx.max_seqlen_k,
             softmax_scale=ctx.softmax_scale,
             dropout_p=ctx.dropout_p,
             causal=ctx.causal,
@@ -262,13 +274,15 @@ class RingFlashAttnVarlenFunc(torch.autograd.Function):
             alibi_slopes=ctx.alibi_slopes,
             deterministic=ctx.deterministic,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 def ring_flash_attn_varlen_qkvpacked_func(
     qkv,
-    cu_seqlens,
-    max_seqlen,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
     dropout_p=0.0,
     softmax_scale=None,
     causal=False,
@@ -282,8 +296,10 @@ def ring_flash_attn_varlen_qkvpacked_func(
         qkv[:, 0],
         qkv[:, 1],
         qkv[:, 2],
-        cu_seqlens,
-        max_seqlen,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
         dropout_p,
         softmax_scale,
         causal,
@@ -298,8 +314,10 @@ def ring_flash_attn_varlen_qkvpacked_func(
 def ring_flash_attn_varlen_kvpacked_func(
     q,
     kv,
-    cu_seqlens,
-    max_seqlen,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
     dropout_p=0.0,
     softmax_scale=None,
     causal=False,
@@ -313,8 +331,10 @@ def ring_flash_attn_varlen_kvpacked_func(
         q,
         kv[:, 0],
         kv[:, 1],
-        cu_seqlens,
-        max_seqlen,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
         dropout_p,
         softmax_scale,
         causal,
@@ -330,8 +350,10 @@ def ring_flash_attn_varlen_func(
     q,
     k,
     v,
-    cu_seqlens,
-    max_seqlen,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
     dropout_p=0.0,
     softmax_scale=None,
     causal=False,
@@ -345,8 +367,10 @@ def ring_flash_attn_varlen_func(
         q,
         k,
         v,
-        cu_seqlens,
-        max_seqlen,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
         dropout_p,
         softmax_scale,
         causal,
